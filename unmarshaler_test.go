@@ -5453,6 +5453,130 @@ func TestUnmarshalMapKeyKinds(t *testing.T) {
 	})
 }
 
+func TestUnmarshalTextScalarMapKeys(t *testing.T) {
+	t.Run("string", func(t *testing.T) {
+		var m map[textScalarStr1109]int
+		assert.NoError(t, toml.Unmarshal([]byte(`raw = 1`), &m))
+		assert.Equal(t, map[textScalarStr1109]int{"text:raw": 1}, m)
+	})
+	t.Run("integer", func(t *testing.T) {
+		var m map[textScalarInt1109]int
+		assert.NoError(t, toml.Unmarshal([]byte(`42 = 1`), &m))
+		assert.Equal(t, map[textScalarInt1109]int{1042: 1}, m)
+	})
+	t.Run("unsigned integer", func(t *testing.T) {
+		var m map[textScalarUint1109]int
+		assert.NoError(t, toml.Unmarshal([]byte(`3 = 1`), &m))
+		assert.Equal(t, map[textScalarUint1109]int{4: 1}, m)
+	})
+	t.Run("float", func(t *testing.T) {
+		var m map[textScalarFloat1109]int
+		assert.NoError(t, toml.Unmarshal([]byte(`"1.5" = 1`), &m))
+		assert.Equal(t, map[textScalarFloat1109]int{15: 1}, m)
+	})
+	t.Run("UnmarshalText error is reported", func(t *testing.T) {
+		var m map[textScalarErr1109]int
+		err := toml.Unmarshal([]byte(`raw = 1`), &m)
+		assert.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "boom"), "error %q should mention the UnmarshalText failure", err)
+	})
+	t.Run("numeric UnmarshalText error is wrapped", func(t *testing.T) {
+		var m map[textScalarInt1109]int
+		err := toml.Unmarshal([]byte(`invalid = 1`), &m)
+		assert.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), `error unmarshaling map key "invalid"`))
+		var numErr *strconv.NumError
+		assert.True(t, errors.As(err, &numErr))
+		assert.Equal(t, "Atoi", numErr.Func)
+	})
+	t.Run("value receiver", func(t *testing.T) {
+		var m map[valueReceiverTextMapKey]int
+		err := toml.Unmarshal([]byte(`raw = 1`), &m)
+		assert.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "invalid text key: raw"))
+	})
+	t.Run("pointer key", func(t *testing.T) {
+		var m map[*textScalarStr1109]int
+		assert.NoError(t, toml.Unmarshal([]byte(`raw = 1`), &m))
+		assert.Equal(t, 1, len(m))
+		for k, v := range m {
+			assert.True(t, k != nil)
+			assert.Equal(t, textScalarStr1109("text:raw"), *k)
+			assert.Equal(t, 1, v)
+		}
+	})
+}
+
+type valueReceiverTextMapKey string
+
+func (valueReceiverTextMapKey) UnmarshalText(text []byte) error {
+	return fmt.Errorf("invalid text key: %s", text)
+}
+
+func TestUnmarshalTextScalarMapKeyPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+	}{
+		{"table", "[raw]\nx = 1"},
+		{"dotted key", "raw.x = 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var m map[textScalarStr1109]map[string]int
+			assert.NoError(t, toml.Unmarshal([]byte(tc.doc), &m))
+			assert.Equal(t, map[textScalarStr1109]map[string]int{"text:raw": {"x": 1}}, m)
+		})
+	}
+	t.Run("inline table", func(t *testing.T) {
+		var x struct{ M map[textScalarStr1109]int }
+		assert.NoError(t, toml.Unmarshal([]byte(`M = {raw = 1}`), &x))
+		assert.Equal(t, map[textScalarStr1109]int{"text:raw": 1}, x.M)
+	})
+	t.Run("captured table", func(t *testing.T) {
+		var m map[textScalarStr1109]rawRecorder
+		assert.NoError(t, decodeRaw(t, "[raw]\nx = 1", &m))
+		assert.Equal(t, 1, len(m))
+		assert.True(t, strings.Contains(m["text:raw"].Raw, "x = 1"))
+	})
+}
+
+func TestUnmarshalNamedMapKeysWithoutTextUnmarshaler(t *testing.T) {
+	type S string
+	type I int8
+	type U uint8
+	type F float64
+	for _, tc := range []struct {
+		name   string
+		doc    string
+		target interface{}
+		want   interface{}
+		err    string
+	}{
+		{"string", "raw = 1", &map[S]int{}, &map[S]int{"raw": 1}, ""},
+		{"integer", "42 = 1", &map[I]int{}, &map[I]int{42: 1}, ""},
+		{"unsigned integer", "3 = 1", &map[U]int{}, &map[U]int{3: 1}, ""},
+		{"float", `"1.5" = 1`, &map[F]int{}, &map[F]int{1.5: 1}, ""},
+		{"integer parse error", "invalid = 1", &map[I]int{}, nil, "cannot parse map key"},
+		{"integer overflow", "128 = 1", &map[I]int{}, nil, "overflows"},
+		{"unsigned integer parse error", "invalid = 1", &map[U]int{}, nil, "cannot parse map key"},
+		{"negative unsigned integer", `"-1" = 1`, &map[U]int{}, nil, "cannot parse map key"},
+		{"unsigned integer overflow", "256 = 1", &map[U]int{}, nil, "overflows"},
+		{"float parse error", "invalid = 1", &map[F]int{}, nil, "cannot parse map key"},
+		{"pointer without TextUnmarshaler", "raw = 1", &map[*S]int{}, nil, "cannot decode a key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := toml.Unmarshal([]byte(tc.doc), tc.target)
+			if tc.err != "" {
+				assert.Error(t, err)
+				assert.True(t, strings.Contains(err.Error(), tc.err))
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, tc.target)
+		})
+	}
+}
+
 func TestUnmarshalScalarOverflows(t *testing.T) {
 	t.Run("int8 overflow", func(t *testing.T) {
 		x := struct{ A int8 }{}
